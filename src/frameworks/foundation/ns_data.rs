@@ -253,6 +253,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow_mut::<NSDataHostObject>(this).bytes
 }
 
+- (())setLength:(NSUInteger)new_length {
+    let &NSDataHostObject {bytes, length, .. } = env.objc.borrow(this);
+    let new_bytes = env.mem.realloc(bytes, new_length);
+    let host = env.objc.borrow_mut::<NSDataHostObject>(this);
+    host.length = new_length;
+    host.bytes = new_bytes;
+    log_dbg!("resizedLengthBy bytes {:?}, new_bytes {:?}; length {}, new_len {}", bytes, new_bytes, length, new_length);
+}
+
 @end
 
 };
