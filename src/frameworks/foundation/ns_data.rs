@@ -249,6 +249,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.mem.memmove(bytes + old_len, append_bytes.cast(), append_length);
 }
 
+- (MutVoidPtr)mutableBytes {
+    env.objc.borrow_mut::<NSDataHostObject>(this).bytes
+}
+
 @end
 
 };
