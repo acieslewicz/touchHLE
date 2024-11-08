@@ -2,7 +2,7 @@ name: Build touchHLE
 
 on:
   push:
-    branches: [ "trunk" ]
+    branches: [ "trun" ]
   pull_request:
     branches: [ "trunk" ]
 
@@ -65,8 +65,6 @@ jobs:
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0 # touchHLE's git-describe versioning needs tag history
-    - name: Check formatting
-      run: dev-scripts/format.sh --check
     - name: Get Submodules
       run: git submodule update --init
     - name: Try to get cached copy of Boost

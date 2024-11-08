@@ -67,8 +67,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new)
 }
 
++ (id)dataWithData:(id)data {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithData:data];
+    autorelease(env, new)
+}
+
 // Calling the standard `init` is also allowed, in which case we just get data
 // of size 0.
+
+- (id)initWithData:(id)data {
+    let bytes: ConstVoidPtr = msg![env; data bytes];
+    let length: NSUInteger = msg![env; data length];
+    msg![env; this initWithBytes:bytes length:length]
+}
 
 - (id)initWithBytesNoCopy:(MutVoidPtr)bytes
                    length:(NSUInteger)length {
@@ -203,8 +215,23 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @implementation NSMutableData: NSData
 
++ (id)dataWithLength:(NSUInteger)length {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithLength:length];
+    autorelease(env, new)
+}
+
 - (id)initWithCapacity:(NSUInteger)_capacity {
     msg![env; this init]
+}
+
+- (id)initWithLength:(NSUInteger)length {
+    let host_object = env.objc.borrow_mut::<NSDataHostObject>(this);
+    assert!(host_object.bytes.is_null() && host_object.length == 0);
+    let alloc = env.mem.alloc(length);
+    host_object.bytes = alloc;
+    host_object.length = length;
+    this
 }
 
 - (id)copyWithZone:(NSZonePtr)_zone {
@@ -232,6 +259,19 @@ pub const CLASSES: ClassExports = objc_classes! {
     log_dbg!("appendBytes old_len {}, append_length {}, length {}", old_len, append_length, length);
     log_dbg!("appendBytes old_bytes {:?}, append_bytes {:?}, bytes {:?}", old_bytes, append_bytes, bytes);
     env.mem.memmove(bytes + old_len, append_bytes.cast(), append_length);
+}
+
+- (MutVoidPtr)mutableBytes {
+    env.objc.borrow_mut::<NSDataHostObject>(this).bytes
+}
+
+- (())setLength:(NSUInteger)new_length {
+    let &NSDataHostObject {bytes, length, .. } = env.objc.borrow(this);
+    let new_bytes = env.mem.realloc(bytes, new_length);
+    let host = env.objc.borrow_mut::<NSDataHostObject>(this);
+    host.length = new_length;
+    host.bytes = new_bytes;
+    log_dbg!("resizedLengthBy bytes {:?}, new_bytes {:?}; length {}, new_len {}", bytes, new_bytes, length, new_length);
 }
 
 @end
