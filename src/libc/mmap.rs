@@ -41,16 +41,19 @@ fn mmap(
 
     assert!(addr.is_null());
     assert_eq!(offset, 0);
-    assert_eq!((flags & MAP_ANON), 0);
-    let new_offset = posix_io::lseek(env, fd, offset, SEEK_SET);
-    assert_eq!(new_offset, offset);
-    let ptr = env.mem.alloc(len);
 
+    let ptr = env.mem.alloc(len);
     assert!(!env.libc_state.mmap.allocations.contains_key(&ptr));
     env.libc_state.mmap.allocations.insert(ptr, len);
 
-    let read = posix_io::read(env, fd, ptr, len);
-    assert_eq!(read as u32, len);
+    if (flags & MAP_ANON) != 0 {
+        env.mem.bytes_at_mut(ptr.cast(), len).fill(0);
+    } else {
+        let new_offset = posix_io::lseek(env, fd, offset, SEEK_SET);
+        assert_eq!(new_offset, offset);
+        let read = posix_io::read(env, fd, ptr, len);
+        assert_eq!(read as u32, len);
+    }
     ptr
 }
 
