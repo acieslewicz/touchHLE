@@ -14,7 +14,8 @@
 //! Relevant Apple documentation:
 //! * [Memory Usage Performance Guidelines](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html)
 
-use crate::libc::wchar::wchar_t;
+use crate::{libc::wchar::wchar_t, mem::allocator::Chunk};
+use std::collections::HashMap;
 
 mod allocator;
 
@@ -203,6 +204,16 @@ unsafe impl<T, const MUT: bool> SafeRead for Ptr<T, MUT> {}
 pub trait SafeWrite: Sized {}
 impl<T: SafeRead> SafeWrite for T {}
 
+pub type ZoneId = u32;
+
+pub const DEFAULT_ZONE_ID: ZoneId = 0;
+
+pub struct MallocZone {
+    name: Option<String>,
+    zone_ptr: MutVoidPtr,
+    allocator: allocator::Allocator,
+}
+
 type Bytes = [u8; 1 << 32];
 
 /// The type that owns the guest memory and provides accessors for it.
@@ -239,6 +250,10 @@ pub struct Mem {
 
     allocator: allocator::Allocator,
 
+    zones: HashMap<ZoneId, MallocZone>,
+
+    default_zone_name: Option<String>,
+
     /// The flag to control if memory is zeroed out on free (`true`, default)
     /// or on alloc (`false`).
     ///
@@ -270,6 +285,8 @@ impl Mem {
     /// iPhone OS secondary thread stack size.
     pub const SECONDARY_THREAD_DEFAULT_STACK_SIZE: GuestUSize = 512 * 1024;
 
+    pub const ZONE_SIZE: GuestUSize = 128 * 1024 * 1024;
+
     /// Create a fresh instance of guest memory.
     pub fn new() -> Mem {
         // This will hopefully get the host OS to lazily allocate the memory.
@@ -282,7 +299,62 @@ impl Mem {
             bytes,
             null_segment_size: 0,
             allocator,
+            zones: HashMap::new(),
+            default_zone_name: Some("DefaultMallocZone".to_string()),
             zero_memory_on_free: true,
+        }
+    }
+
+    /// Create a fresh zone in the guest memory.
+    pub fn create_zone(&mut self, size: GuestUSize) -> ZoneId {
+        let zone_ptr = self.calloc(size);
+        let zone_id = zone_ptr.to_bits();
+
+        let mut allocator = allocator::Allocator::new();
+
+        if zone_ptr.to_bits() > 0 {
+            allocator.reserve(Chunk::new(0, zone_ptr.to_bits()));
+        }
+        allocator.reserve(Chunk::new(
+            zone_ptr.to_bits() + size,
+            Mem::MAIN_THREAD_STACK_LOW_END.wrapping_sub(zone_ptr.to_bits() + size),
+        ));
+
+        let zone = MallocZone {
+            name: None,
+            zone_ptr,
+            allocator,
+        };
+
+        self.zones.insert(zone_id, zone);
+
+        zone_id
+    }
+
+    pub fn destroy_zone(&mut self, zone: ZoneId) {
+        let zone_ptr = if let Some(zone) = self.zones.get(&zone) {
+            zone.zone_ptr
+        } else {
+            return;
+        };
+
+        // We can simply free the zone allocation to destroy it
+        self.free(zone_ptr);
+
+        self.zones.remove(&zone_ptr.to_bits());
+    }
+
+    pub fn set_zone_name(&mut self, zone: ZoneId, name: ConstPtr<u8>) {
+        let name = match self.cstr_at_utf8(name) {
+            Ok(name) => name.to_string(),
+            Err(_) => return,
+        };
+        log!("Setting zone name to: {:?}", name);
+
+        if zone == DEFAULT_ZONE_ID {
+            self.default_zone_name = Some(name);
+        } else if let Some(zone) = self.zones.get_mut(&zone) {
+            zone.name = Some(name);
         }
     }
 
@@ -303,6 +375,8 @@ impl Mem {
             mem.bytes_mut()[base as usize..][..size.get() as usize].fill(0);
         }
         mem.null_segment_size = 0;
+        mem.zones.clear();
+        mem.default_zone_name = Some("DefaultMallocZone".to_string());
         mem
     }
 
@@ -518,7 +592,20 @@ impl Mem {
 
     /// Allocate `size` bytes.
     pub fn alloc(&mut self, size: GuestUSize) -> MutVoidPtr {
-        let ptr = Ptr::from_bits(self.allocator.alloc(size));
+        self.zone_alloc(DEFAULT_ZONE_ID, size)
+    }
+
+    /// Allocate `size` bytes within `zone_id` zone
+    pub fn zone_alloc(&mut self, zone_id: ZoneId, size: GuestUSize) -> MutVoidPtr {
+        let allocator = if zone_id == DEFAULT_ZONE_ID {
+            &mut self.allocator
+        } else if let Some(zone) = self.zones.get_mut(&zone_id) {
+            &mut zone.allocator
+        } else {
+            return Ptr::null();
+        };
+
+        let ptr = Ptr::from_bits(allocator.alloc(size));
         if !self.zero_memory_on_free {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
@@ -555,7 +642,20 @@ impl Mem {
 
     /// Free an allocation made with one of the `alloc` methods on this type.
     pub fn free(&mut self, ptr: MutVoidPtr) {
-        let size = self.allocator.free(ptr.to_bits());
+        self.zone_free(DEFAULT_ZONE_ID, ptr)
+    }
+
+    /// Free an allocation made with one of the `alloc` methods in a zone
+    pub fn zone_free(&mut self, zone_id: ZoneId, ptr: MutVoidPtr) {
+        let allocator = if zone_id == DEFAULT_ZONE_ID {
+            &mut self.allocator
+        } else if let Some(zone) = self.zones.get_mut(&zone_id) {
+            &mut zone.allocator
+        } else {
+            return;
+        };
+
+        let size = allocator.free(ptr.to_bits());
         if self.zero_memory_on_free {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
