@@ -12,7 +12,9 @@ use crate::libc::clocale::{setlocale, LC_CTYPE};
 use crate::libc::errno::set_errno;
 use crate::libc::string::strlen;
 use crate::libc::wchar::wchar_t;
-use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr};
+use crate::mem::{
+    ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr, ZoneId, DEFAULT_ZONE_ID,
+};
 use crate::Environment;
 use std::str::FromStr;
 
@@ -33,7 +35,11 @@ fn malloc(env: &mut Environment, size: GuestUSize) -> MutVoidPtr {
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    env.mem.alloc(size)
+    malloc_zone_malloc(env, DEFAULT_ZONE_ID, size)
+}
+
+fn malloc_zone_malloc(env: &mut Environment, zone: ZoneId, size: GuestUSize) -> MutVoidPtr {
+    env.mem.zone_alloc(zone, size)
 }
 
 fn malloc_size(env: &mut Environment, ptr: ConstVoidPtr) -> GuestUSize {
@@ -68,15 +74,27 @@ fn free(env: &mut Environment, ptr: MutVoidPtr) {
         env.objc.dealloc_object(ptr.cast(), &mut env.mem);
         return;
     }
+    malloc_zone_free(env, DEFAULT_ZONE_ID, ptr);
+}
 
-    // TODO: handle errno properly
-    set_errno(env, 0);
-
+fn malloc_zone_free(env: &mut Environment, zone: ZoneId, ptr: MutVoidPtr) {
     if ptr.is_null() {
         // "If ptr is a NULL pointer, no operation is performed."
         return;
     }
-    env.mem.free(ptr);
+    env.mem.zone_free(zone, ptr);
+}
+
+fn malloc_create_zone(env: &mut Environment, _start_size: GuestUSize, _flags: u32) -> ZoneId {
+    env.mem.create_zone(Mem::ZONE_SIZE)
+}
+
+fn malloc_destroy_zone(env: &mut Environment, zone: ZoneId) {
+    env.mem.destroy_zone(zone);
+}
+
+fn malloc_set_zone_name(env: &mut Environment, zone: ZoneId, name: ConstPtr<u8>) {
+    env.mem.set_zone_name(zone, name);
 }
 
 fn atexit(
@@ -421,6 +439,11 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(malloc_size(_)),
     export_c_func!(calloc(_, _)),
     export_c_func!(realloc(_, _)),
+    export_c_func!(malloc_create_zone(_, _)),
+    export_c_func!(malloc_destroy_zone(_)),
+    export_c_func!(malloc_zone_free(_, _)),
+    export_c_func!(malloc_zone_malloc(_, _)),
+    export_c_func!(malloc_set_zone_name(_, _)),
     export_c_func!(free(_)),
     export_c_func!(atexit(_)),
     export_c_func!(atoi(_)),
