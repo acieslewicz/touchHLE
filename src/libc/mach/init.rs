@@ -7,9 +7,16 @@
 //!
 //! There's not much documentation available for these.
 
-use crate::dyld::{ConstantExports, HostConstant};
+use crate::dyld::{ConstantExports, FunctionExports, HostConstant};
+use crate::environment::Environment;
+use crate::export_c_func;
+use crate::libc::mach::port::mach_port_t;
 use crate::libc::mach::task::MACH_TASK_SELF;
 use crate::libc::mach::vm::PAGE_SIZE;
+
+pub fn mach_task_self(_env: &mut Environment) -> mach_port_t {
+    MACH_TASK_SELF
+}
 
 pub const CONSTANTS: ConstantExports = &[
     (
@@ -21,3 +28,5 @@ pub const CONSTANTS: ConstantExports = &[
         HostConstant::Custom(|mem, _| mem.alloc_and_write(PAGE_SIZE).cast_void().cast_const()),
     ),
 ];
+
+pub const FUNCTIONS: FunctionExports = &[export_c_func!(mach_task_self())];
