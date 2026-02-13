@@ -56,15 +56,31 @@ impl Chunk {
             return None;
         }
 
-        let left = match middle.base - self.base {
-            0 => None,
-            size => Some(Chunk::new(self.base, size)),
+        Some(self.carve_out(middle))
+    }
+
+    #[inline(always)]
+    /// Returns non overlapping chunks relative to other
+    fn carve_out(&self, other: Chunk) -> (Option<Chunk>, Option<Chunk>) {
+        if other.last_byte() < self.base {
+            return (None, Some(*self));
+        }
+
+        if other.base > self.last_byte() {
+            return (Some(*self), None);
+        }
+
+        let left = match other.base.checked_sub(self.base) {
+            None | Some(0) => None,
+            Some(size) => Some(Chunk::new(self.base, size)),
         };
-        let right = match self.last_byte() - middle.last_byte() {
-            0 => None,
-            size => Some(Chunk::new(middle.last_byte() + 1, size)),
+
+        let right = match self.last_byte().checked_sub(other.last_byte()) {
+            None | Some(0) => None,
+            Some(size) => Some(Chunk::new(other.last_byte() + 1, size)),
         };
-        Some((left, right))
+
+        (left, right)
     }
 }
 
@@ -119,6 +135,39 @@ mod chunk_tests {
         let a = Chunk::new(0, 10);
         let b = Chunk::new(20, 10);
         a.merge(b);
+    }
+
+    #[test]
+    fn carve_out() {
+        let test_chunk = Chunk::new(10, 10);
+        assert_eq!(
+            test_chunk.carve_out(Chunk::new(0, 5)),
+            (None, Some(Chunk::new(10, 10)))
+        );
+
+        assert_eq!(
+            test_chunk.carve_out(Chunk::new(20, 10)),
+            (Some(Chunk::new(10, 10)), None)
+        );
+
+        assert_eq!(test_chunk.carve_out(Chunk::new(10, 10)), (None, None));
+
+        assert_eq!(test_chunk.carve_out(Chunk::new(9, 15)), (None, None));
+
+        assert_eq!(
+            test_chunk.carve_out(Chunk::new(5, 10)),
+            (None, Some(Chunk::new(15, 5)))
+        );
+
+        assert_eq!(
+            test_chunk.carve_out(Chunk::new(15, 10)),
+            (Some(Chunk::new(10, 5)), None)
+        );
+
+        assert_eq!(
+            test_chunk.carve_out(Chunk::new(13, 3)),
+            (Some(Chunk::new(10, 3)), Some(Chunk::new(16, 4)))
+        );
     }
 }
 
