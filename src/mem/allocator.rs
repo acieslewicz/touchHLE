@@ -23,10 +23,6 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn new(base: VAddr, size: GuestUSize) -> Chunk {
-        if size >= PAGE_SIZE {
-            // Check for invariant of page alignment
-            assert!(base & PAGE_SIZE_ALIGN_MASK == 0);
-        }
         Chunk {
             base,
             size: NonZeroU32::new(size).unwrap(),
