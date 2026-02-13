@@ -29,6 +29,17 @@ impl Chunk {
         }
     }
 
+    fn merge(self, other: Chunk) -> Chunk {
+        assert!(
+            self.last_byte() + 1 == other.base || other.last_byte() + 1 == self.base,
+            "Chunks must be adjacent to merge"
+        );
+        Chunk::new(
+            self.base.min(other.base),
+            self.size.get() + other.size.get(),
+        )
+    }
+
     #[inline(always)]
     fn last_byte(&self) -> VAddr {
         self.base + (self.size.get() - 1)
@@ -92,6 +103,22 @@ mod chunk_tests {
         );
         assert_eq!(Chunk::new(2, 4).trisect_by(Chunk::new(1, 2)), None);
         assert_eq!(Chunk::new(2, 4).trisect_by(Chunk::new(5, 2)), None);
+    }
+
+    #[test]
+    fn merge() {
+        let a = Chunk::new(0, 10);
+        let b = Chunk::new(10, 10);
+        assert_eq!(a.merge(b), Chunk::new(0, 20));
+        assert_eq!(b.merge(a), Chunk::new(0, 20));
+    }
+
+    #[test]
+    #[should_panic]
+    fn merge_non_adjacent() {
+        let a = Chunk::new(0, 10);
+        let b = Chunk::new(20, 10);
+        a.merge(b);
     }
 }
 
@@ -341,10 +368,7 @@ impl Allocator {
             .remove_with_base(freed.last_byte() + 1)
             .or_else(|| self.unused_chunks.remove_with_end(freed.base))
         {
-            let combined = Chunk::new(
-                freed.base.min(adjacent.base),
-                freed.size.get() + adjacent.size.get(),
-            );
+            let combined = adjacent.merge(freed);
             self.unused_chunks.insert(combined);
         } else {
             self.unused_chunks.insert(freed);
