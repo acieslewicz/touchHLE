@@ -287,7 +287,7 @@ impl Mem {
 
         let bytes = ptr as *mut Bytes;
 
-        let allocator = allocator::Allocator::new();
+        let allocator = allocator::Allocator::new(0, Self::MAIN_THREAD_STACK_LOW_END);
 
         Mem {
             bytes,

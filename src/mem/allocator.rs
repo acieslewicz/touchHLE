@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-use super::{GuestUSize, Mem, VAddr, PAGE_SIZE, PAGE_SIZE_ALIGN_MASK};
+use super::{GuestUSize, VAddr, PAGE_SIZE, PAGE_SIZE_ALIGN_MASK};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
@@ -266,19 +266,14 @@ pub struct Allocator {
 }
 
 impl Allocator {
-    pub fn new() -> Allocator {
-        let main_thread_stack =
-            Chunk::new(Mem::MAIN_THREAD_STACK_LOW_END, Mem::MAIN_THREAD_STACK_SIZE);
-        let rest = Chunk::new(0, Mem::MAIN_THREAD_STACK_LOW_END);
-
-        let mut used_chunks: ChunkMap = Default::default();
-        used_chunks.insert(main_thread_stack);
+    pub fn new(base: VAddr, size: GuestUSize) -> Allocator {
+        let allocation_space = Chunk::new(base, size);
 
         let mut unused_chunks: SizeBucketedChunkMap = Default::default();
-        unused_chunks.insert(rest);
+        unused_chunks.insert(allocation_space);
 
         Allocator {
-            used_chunks,
+            used_chunks: Default::default(),
             unused_chunks,
         }
     }
