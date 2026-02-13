@@ -129,27 +129,40 @@ mod collections {
         }
     }
 
-    #[derive(Default, Debug)]
+    #[derive(Debug)]
     pub struct SizeBucketedChunkMap {
+        min_chunk_size: u32,
         chunks: ChunkMap,
-        chunks_by_log2_size: [Vec<Chunk>; Self::bucket_for(u32::MAX) + 1],
+        chunks_by_log2_size: Vec<Vec<Chunk>>,
     }
     impl SizeBucketedChunkMap {
+        pub fn new(min_chunk_size: u32) -> Self {
+            Self {
+                min_chunk_size,
+                chunks: Default::default(),
+                chunks_by_log2_size: vec![
+                    Vec::new();
+                    (u32::MAX.ilog2() - min_chunk_size.ilog2()) as usize + 1
+                ],
+            }
+        }
+
         /// Get log2 size bucket for chunk.
-        #[inline(always)]
-        const fn bucket_for(size: GuestUSize) -> usize {
-            (size.ilog2() - MIN_CHUNK_SIZE.ilog2()) as usize
+        fn bucket_for(&self, size: GuestUSize) -> usize {
+            (size.ilog2() - self.min_chunk_size.ilog2()) as usize
         }
 
         pub fn insert(&mut self, chunk: Chunk) {
-            assert!(chunk.size.get() >= MIN_CHUNK_SIZE);
+            assert!(chunk.size.get() >= self.min_chunk_size);
             self.chunks.insert(chunk);
-            self.chunks_by_log2_size[Self::bucket_for(chunk.size.get())].push(chunk);
+            let bucket_size = self.bucket_for(chunk.size.get());
+            self.chunks_by_log2_size[bucket_size].push(chunk);
         }
 
         #[inline(always)]
         fn remove_from_bucket(&mut self, chunk: Chunk) {
-            let bucket = &mut self.chunks_by_log2_size[Self::bucket_for(chunk.size.get())];
+            let bucket_size = self.bucket_for(chunk.size.get());
+            let bucket = &mut self.chunks_by_log2_size[bucket_size];
             // Search from the end (recent frees are usually at the end, so
             // following the generational hypothesis, that's a better place to
             // start)
@@ -212,12 +225,12 @@ mod collections {
         }
 
         pub fn allocate(&mut self, size: GuestUSize) -> Option<Chunk> {
-            assert!(size >= MIN_CHUNK_SIZE);
+            assert!(size >= self.min_chunk_size);
 
             // Look in the smallest bucket first. This is the only bucket where
             // an exact match can be found.
 
-            let bucket = Self::bucket_for(size);
+            let bucket = self.bucket_for(size);
             if let Some(alloc) = self.allocate_in_bucket(size, bucket) {
                 return Some(alloc);
             }
@@ -254,7 +267,7 @@ impl Allocator {
     pub fn new(base: VAddr, size: GuestUSize) -> Allocator {
         let allocation_space = Chunk::new(base, size);
 
-        let mut unused_chunks: SizeBucketedChunkMap = Default::default();
+        let mut unused_chunks = SizeBucketedChunkMap::new(MIN_CHUNK_SIZE);
         unused_chunks.insert(allocation_space);
 
         Allocator {
