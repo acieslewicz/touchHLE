@@ -509,7 +509,12 @@ impl Mem {
 
     /// Allocate `size` bytes.
     pub fn alloc(&mut self, size: GuestUSize) -> MutVoidPtr {
-        let ptr = Ptr::from_bits(self.allocator.alloc(size));
+        let ptr = match self.allocator.alloc(size) {
+            None => {
+                panic!("Could not find large enough chunk to allocate {size:#x} bytes")
+            }
+            Some(address) => Ptr::from_bits(address),
+        };
         if !self.zero_memory_on_free {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }

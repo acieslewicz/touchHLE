@@ -376,16 +376,15 @@ impl Allocator {
         self.used_chunks.insert(chunk);
     }
 
-    pub fn alloc(&mut self, size: GuestUSize) -> VAddr {
+    pub fn alloc(&mut self, size: GuestUSize) -> Option<VAddr> {
         let size = size.max(MIN_CHUNK_SIZE);
         let size = Self::align(size, MIN_CHUNK_SIZE);
 
-        let Some(alloc) = self.unused_chunks.allocate(size) else {
-            panic!("Could not find large enough chunk to allocate {size:#x} bytes");
-        };
+        let alloc = self.unused_chunks.allocate(size)?;
+
         self.used_chunks.insert(alloc);
 
-        alloc.base
+        Some(alloc.base)
     }
 
     fn align(size: GuestUSize, align: GuestUSize) -> GuestUSize {
