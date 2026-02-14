@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-use super::{GuestUSize, VAddr};
+use super::{GuestUSize, VAddr, PAGE_SIZE};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
@@ -334,46 +334,22 @@ use collections::{ChunkMap, SizeBucketedChunkMap};
 
 /// Tracks which memory is in use and makes allocations from it.
 #[derive(Debug)]
-pub struct Allocator {
+pub struct HeapAllocator {
     used_chunks: ChunkMap,
     unused_chunks: SizeBucketedChunkMap,
 }
 
-impl Allocator {
-    pub fn new(base: VAddr, size: GuestUSize) -> Allocator {
+impl HeapAllocator {
+    pub fn new(base: VAddr, size: GuestUSize) -> HeapAllocator {
         let allocation_space = Chunk::new(base, size);
 
         let mut unused_chunks = SizeBucketedChunkMap::new(MIN_CHUNK_SIZE);
         unused_chunks.insert(allocation_space);
 
-        Allocator {
+        HeapAllocator {
             used_chunks: Default::default(),
             unused_chunks,
         }
-    }
-
-    pub fn reserve(&mut self, chunk: Chunk) {
-        let mut to_trisect = None;
-        for unused_chunk in self.unused_chunks.iter() {
-            if unused_chunk.trisect_by(chunk).is_some() {
-                to_trisect = Some(unused_chunk);
-                break;
-            }
-        }
-
-        let Some(to_trisect) = to_trisect else {
-            panic!("Could not reserve chunk {chunk:?}!");
-        };
-
-        let (before, after) = to_trisect.trisect_by(chunk).unwrap();
-        self.unused_chunks.remove_with_base(to_trisect.base);
-        if let Some(before) = before {
-            self.unused_chunks.insert(before);
-        }
-        if let Some(after) = after {
-            self.unused_chunks.insert(after);
-        }
-        self.used_chunks.insert(chunk);
     }
 
     pub fn alloc(&mut self, size: GuestUSize) -> Option<VAddr> {
@@ -423,5 +399,70 @@ impl Allocator {
         }
 
         freed.size.get()
+    }
+}
+
+/// Virtual Memory Allocator which handles allocation with page granularity
+#[derive(Debug)]
+pub struct VMAllocator {
+    used_chunks: ChunkMap,
+    unused_chunks: SizeBucketedChunkMap,
+}
+
+impl VMAllocator {
+    pub fn new(base: VAddr, size: GuestUSize) -> VMAllocator {
+        let allocation_space = Chunk::new(base, size);
+
+        let mut unused_chunks = SizeBucketedChunkMap::new(PAGE_SIZE);
+        unused_chunks.insert(allocation_space);
+
+        VMAllocator {
+            used_chunks: Default::default(),
+            unused_chunks,
+        }
+    }
+
+    pub fn allocate(&mut self, address: Option<VAddr>, size: GuestUSize) -> Option<Chunk> {
+        let size = size.next_multiple_of(PAGE_SIZE);
+        match address {
+            Some(address) => {
+                let address = address & !(PAGE_SIZE - 1);
+                self.allocate_at(address, size)
+            }
+            None => self.allocate_any(size),
+        }
+    }
+
+    fn allocate_at(&mut self, address: VAddr, size: GuestUSize) -> Option<Chunk> {
+        assert!(address.is_multiple_of(PAGE_SIZE));
+        assert!(size.is_multiple_of(PAGE_SIZE) && size >= PAGE_SIZE);
+        let chunk = Chunk::new(address, size);
+
+        let to_trisect = self
+            .unused_chunks
+            .iter()
+            .find(|unused_chunk| unused_chunk.trisect_by(chunk).is_some())?;
+
+        let (before, after) = to_trisect.trisect_by(chunk).unwrap();
+        self.unused_chunks.remove_with_base(to_trisect.base);
+        if let Some(before) = before {
+            self.unused_chunks.insert(before);
+        }
+        if let Some(after) = after {
+            self.unused_chunks.insert(after);
+        }
+        self.used_chunks.insert(chunk);
+
+        Some(chunk)
+    }
+
+    fn allocate_any(&mut self, size: GuestUSize) -> Option<Chunk> {
+        assert!(size.is_multiple_of(PAGE_SIZE) && size >= PAGE_SIZE);
+
+        let alloc = self.unused_chunks.allocate(size)?;
+
+        self.used_chunks.insert(alloc);
+
+        Some(alloc)
     }
 }
