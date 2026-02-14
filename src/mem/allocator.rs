@@ -203,6 +203,41 @@ mod collections {
         pub fn get_size_with_base(&self, base: VAddr) -> Option<NonZeroU32> {
             self.chunks.get(&base).copied()
         }
+
+        pub fn overlapping_chunks(&self, chunk: Chunk) -> impl Iterator<Item = Chunk> + '_ {
+            let start = self
+                .chunks
+                .range(..=chunk.base)
+                .next_back()
+                .filter(|(&base, &size)| chunk.base < base + size.get())
+                .map(|(&base, _)| base)
+                .unwrap_or(chunk.base);
+
+            self.chunks
+                .range(start..=chunk.last_byte())
+                .map(|(&base, size)| Chunk::new(base, size.get()))
+        }
+
+        /// Remove all chunks overlapping a provided Chunk. In the case
+        /// of overlap the non overlapping portion is carved out
+        pub fn remove_range(&mut self, remove: Chunk) {
+            let bases: Vec<VAddr> = self
+                .overlapping_chunks(remove)
+                .map(|chunk| chunk.base)
+                .collect();
+
+            for base in bases {
+                let chunk = self.remove_with_base(base).unwrap();
+                let (left, right) = chunk.carve_out(remove);
+                if let Some(left) = left {
+                    self.insert(left);
+                }
+
+                if let Some(right) = right {
+                    self.insert(right);
+                }
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -259,6 +294,28 @@ mod collections {
             let chunk = self.chunks.remove_with_end(end)?;
             self.remove_from_bucket(chunk);
             Some(chunk)
+        }
+
+        /// Remove all chunks overlapping a provided Chunk. In the case
+        /// of overlap the non overlapping portion is carved out
+        pub fn remove_range(&mut self, remove: Chunk) {
+            let bases: Vec<VAddr> = self
+                .chunks
+                .overlapping_chunks(remove)
+                .map(|chunk| chunk.base)
+                .collect();
+
+            for base in bases {
+                let chunk = self.remove_with_base(base).unwrap();
+                let (left, right) = chunk.carve_out(remove);
+                if let Some(left) = left {
+                    self.insert(left);
+                }
+
+                if let Some(right) = right {
+                    self.insert(right);
+                }
+            }
         }
 
         fn allocate_in_bucket(&mut self, size: GuestUSize, bucket: usize) -> Option<Chunk> {
@@ -337,6 +394,8 @@ use collections::{ChunkMap, SizeBucketedChunkMap};
 pub struct HeapAllocator {
     used_chunks: ChunkMap,
     unused_chunks: SizeBucketedChunkMap,
+    // These are chunks that are managed by and external allocator
+    external_chunks: ChunkMap,
 }
 
 impl HeapAllocator {
@@ -349,6 +408,7 @@ impl HeapAllocator {
         HeapAllocator {
             used_chunks: Default::default(),
             unused_chunks,
+            external_chunks: Default::default(),
         }
     }
 
@@ -373,15 +433,27 @@ impl HeapAllocator {
 
     /// This is used for realloc
     pub fn find_allocated_size(&mut self, base: VAddr) -> GuestUSize {
+        if let Some(size) = self.external_chunks.get_size_with_base(base) {
+            return size.get();
+        }
         let Some(size) = self.used_chunks.get_size_with_base(base) else {
             panic!("Can't find {base:#x}, unknown allocation!");
         };
         size.get()
     }
 
+    /// Add a chunk that was allocated by an exteral allocator
+    pub fn add_external_allocation(&mut self, chunk: Chunk) {
+        self.external_chunks.insert(chunk);
+    }
+
     /// Returns the size of the freed chunk so it can be zeroed if desired
     #[must_use]
     pub fn free(&mut self, base: VAddr) -> GuestUSize {
+        if let Some(freed) = self.external_chunks.remove_with_base(base) {
+            return freed.size.get();
+        }
+
         let Some(freed) = self.used_chunks.remove_with_base(base) else {
             log!("Can't free {:#x}, unknown allocation!", base);
             return 0;
@@ -431,6 +503,33 @@ impl VMAllocator {
             }
             None => self.allocate_any(size),
         }
+    }
+
+    pub fn deallocate(&mut self, address: VAddr, size: GuestUSize) {
+        // From testing vm_deallocate you can deallocate anything as long as
+        // the memory is not protected. Since we have no permissions we can
+        // always succeed
+        let size = size.next_multiple_of(PAGE_SIZE);
+        let address = address & !(PAGE_SIZE - 1);
+        let freed = Chunk::new(address, size);
+
+        self.used_chunks.remove_range(freed);
+        self.unused_chunks.remove_range(freed);
+
+        let left_adjacent = self.unused_chunks.remove_with_base(freed.last_byte() + 1);
+        let right_adjacent = self.unused_chunks.remove_with_end(freed.base);
+
+        let mut combined = freed;
+
+        if let Some(adjacent) = left_adjacent {
+            combined = combined.merge(adjacent);
+        }
+
+        if let Some(adjacent) = right_adjacent {
+            combined = combined.merge(adjacent);
+        }
+
+        self.unused_chunks.insert(combined);
     }
 
     fn allocate_at(&mut self, address: VAddr, size: GuestUSize) -> Option<Chunk> {

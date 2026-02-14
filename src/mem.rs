@@ -14,7 +14,10 @@
 //! Relevant Apple documentation:
 //! * [Memory Usage Performance Guidelines](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html)
 
-use crate::{libc::wchar::wchar_t, mem::allocator::HeapAllocator};
+use crate::{
+    libc::wchar::wchar_t,
+    mem::allocator::{Chunk, HeapAllocator},
+};
 
 mod allocator;
 mod host;
@@ -277,6 +280,10 @@ impl Mem {
     /// This is arbitrarily set to 128 MB, eventually the heap will grow.
     pub const HEAP_SIZE: GuestUSize = 128 * 1024 * 1024;
 
+    /// This is the maximum allocation for the heap. Anything else is
+    /// deferred to the vm allocator
+    pub const MAX_HEAP_ALLOCATION_SIZE: GuestUSize = PAGE_SIZE * 2;
+
     /// Create a fresh instance of guest memory.
     pub fn new() -> Mem {
         let size = std::mem::size_of::<Bytes>();
@@ -522,16 +529,44 @@ impl Mem {
 
     /// Allocate `size` bytes.
     pub fn alloc(&mut self, size: GuestUSize) -> MutVoidPtr {
-        let ptr = match self.heap_allocator().alloc(size) {
-            None => {
-                panic!("Could not find large enough chunk to allocate {size:#x} bytes")
+        let ptr = if size > Self::MAX_HEAP_ALLOCATION_SIZE {
+            let ptr = self.alloc_paged(size);
+
+            self.heap_allocator()
+                .add_external_allocation(Chunk::new(ptr.to_bits(), size));
+
+            ptr
+        } else {
+            match self.heap_allocator().alloc(size) {
+                None => {
+                    panic!("Could not find large enough chunk to allocate {size:#x} bytes")
+                }
+                Some(address) => Ptr::from_bits(address),
             }
-            Some(address) => Ptr::from_bits(address),
         };
         if !self.zero_memory_on_free {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
         log_dbg!("Allocated {:?} ({:#x} bytes)", ptr, size);
+        ptr
+    }
+
+    /// Allocate `size` bytes using the virtual memory allocator.
+    /// All allocations are page aligned, page sized and zeroed.
+    pub fn alloc_paged(&mut self, size: GuestUSize) -> MutVoidPtr {
+        let allocation = match self.vm_allocator.allocate(None, size) {
+            None => {
+                panic!("Could not find large enough chunk to allocate {size:#x} bytes")
+            }
+            Some(chunk) => chunk,
+        };
+
+        let ptr = Ptr::from_bits(allocation.base);
+
+        // VM allocations are always 0 initialized.
+        // TODO: Can this be done with vm_advise/equivalents
+        self.bytes_at_mut(ptr.cast(), allocation.size.get()).fill(0);
+
         ptr
     }
 
@@ -565,6 +600,11 @@ impl Mem {
     /// Free an allocation made with one of the `alloc` methods on this type.
     pub fn free(&mut self, ptr: MutVoidPtr) {
         let size = self.heap_allocator().free(ptr.to_bits());
+
+        if size > Self::MAX_HEAP_ALLOCATION_SIZE {
+            self.vm_allocator.deallocate(ptr.to_bits(), size);
+        }
+
         if self.zero_memory_on_free {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
