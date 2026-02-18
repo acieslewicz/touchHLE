@@ -5,12 +5,20 @@
  */
 //! `malloc.h` memory management zones
 
+use std::{cell::OnceCell, collections::HashMap};
+
 use crate::{
     dyld::FunctionExports,
     environment::Environment,
     export_c_func,
-    mem::{ConstPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeRead},
+    mem::{AllocatorID, ConstPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeRead},
 };
+
+#[derive(Default)]
+pub struct MallocZones {
+    default_zone: OnceCell<MutPtr<malloc_zone_t>>,
+    zone_to_allocator: HashMap<MutPtr<malloc_zone_t>, AllocatorID>,
+}
 
 #[repr(C, packed)]
 #[allow(non_camel_case_types)]
@@ -56,7 +64,17 @@ impl malloc_zone_t {
 }
 
 fn malloc_default_zone(env: &mut Environment) -> MutPtr<malloc_zone_t> {
-    env.mem.get_default_zone()
+    if env.malloc_zones.default_zone.get().is_none() {
+        let zone = env.mem.alloc_and_write(malloc_zone_t::new());
+        env.malloc_zones.default_zone.set(zone).unwrap();
+        assert!(env
+            .malloc_zones
+            .zone_to_allocator
+            .insert(zone, env.mem.get_default_allocator())
+            .is_none());
+    }
+
+    *env.malloc_zones.default_zone.get().unwrap()
 }
 
 fn malloc_create_zone(
@@ -64,11 +82,24 @@ fn malloc_create_zone(
     start_size: GuestUSize,
     _flags: u32,
 ) -> MutPtr<malloc_zone_t> {
-    env.mem.create_zone(start_size)
+    let zone = env.mem.alloc_and_write(malloc_zone_t::new());
+    let allocator = env.mem.create_allocator(start_size);
+    assert!(env
+        .malloc_zones
+        .zone_to_allocator
+        .insert(zone, allocator)
+        .is_none());
+    zone
 }
 
 fn malloc_destroy_zone(env: &mut Environment, zone: MutPtr<malloc_zone_t>) {
-    env.mem.destroy_zone(zone);
+    env.mem.free(zone.cast());
+    let allocator = env
+        .malloc_zones
+        .zone_to_allocator
+        .remove(&zone)
+        .expect("Zone {zone:?} does not map to an allocator");
+    env.mem.destroy_allocator(allocator);
 }
 
 pub const FUNCTIONS: FunctionExports = &[
