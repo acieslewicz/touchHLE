@@ -354,6 +354,22 @@ impl Mem {
         *self.default_zone.get().unwrap()
     }
 
+    pub fn create_zone(&mut self, start_size: GuestUSize) -> MutPtr<malloc_zone_t> {
+        let zone = self.alloc_and_write(malloc_zone_t::new());
+
+        let allocator = if start_size == 0 {
+            allocator::HeapAllocator::new_empty()
+        } else {
+            let Some(heap) = self.vm_allocator.allocate(None, Self::HEAP_SIZE) else {
+                panic!("Failed to allocate space for heap");
+            };
+            allocator::HeapAllocator::new(heap.base, heap.size.get())
+        };
+
+        assert!(self.heap_allocators.insert(zone, allocator).is_none());
+        zone
+    }
+
     /// Get the allocator for the corresponding memory zone
     fn get_allocator(&mut self, zone: MutPtr<malloc_zone_t>) -> &mut allocator::HeapAllocator {
         self.heap_allocators.get_mut(&zone).unwrap_or_else(|| {

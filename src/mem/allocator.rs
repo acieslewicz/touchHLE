@@ -413,6 +413,14 @@ impl HeapAllocator {
         }
     }
 
+    pub fn new_empty() -> HeapAllocator {
+        HeapAllocator {
+            used_chunks: Default::default(),
+            unused_chunks: SizeBucketedChunkMap::new(MIN_CHUNK_SIZE),
+            external_chunks: Default::default(),
+        }
+    }
+
     pub fn grow(&mut self, chunk: Chunk) {
         assert!(self.used_chunks.overlapping_chunks(chunk).next().is_none());
         self.unused_chunks.insert(chunk);

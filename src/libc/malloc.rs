@@ -9,7 +9,7 @@ use crate::{
     dyld::FunctionExports,
     environment::Environment,
     export_c_func,
-    mem::{ConstPtr, MutPtr, MutVoidPtr, Ptr, SafeRead},
+    mem::{ConstPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeRead},
 };
 
 #[repr(C, packed)]
@@ -59,4 +59,15 @@ fn malloc_default_zone(env: &mut Environment) -> MutPtr<malloc_zone_t> {
     env.mem.get_default_zone()
 }
 
-pub const FUNCTIONS: FunctionExports = &[export_c_func!(malloc_default_zone())];
+fn malloc_create_zone(
+    env: &mut Environment,
+    start_size: GuestUSize,
+    _flags: u32,
+) -> MutPtr<malloc_zone_t> {
+    env.mem.create_zone(start_size)
+}
+
+pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(malloc_default_zone()),
+    export_c_func!(malloc_create_zone(_, _)),
+];
