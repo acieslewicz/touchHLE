@@ -14,9 +14,11 @@
 //! Relevant Apple documentation:
 //! * [Memory Usage Performance Guidelines](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html)
 
+use std::{cell::OnceCell, collections::HashMap};
+
 use crate::{
-    libc::wchar::wchar_t,
-    mem::allocator::{Chunk, HeapAllocator},
+    libc::{malloc::malloc_zone_t, wchar::wchar_t},
+    mem::allocator::Chunk,
 };
 
 mod allocator;
@@ -244,7 +246,8 @@ pub struct Mem {
     /// range.
     null_segment_size: VAddr,
 
-    heap_allocator: Option<allocator::HeapAllocator>,
+    default_zone: OnceCell<MutPtr<malloc_zone_t>>,
+    heap_allocators: HashMap<MutPtr<malloc_zone_t>, allocator::HeapAllocator>,
     vm_allocator: allocator::VMAllocator,
 
     /// The flag to control if memory is zeroed out on free (`true`, default)
@@ -304,8 +307,9 @@ impl Mem {
         Mem {
             bytes,
             null_segment_size: 0,
+            default_zone: Default::default(),
+            heap_allocators: Default::default(),
             vm_allocator,
-            heap_allocator: None,
             zero_memory_on_free: true,
         }
     }
@@ -329,12 +333,34 @@ impl Mem {
         self.null_segment_size
     }
 
-    fn heap_allocator(&mut self) -> &mut HeapAllocator {
-        self.heap_allocator.get_or_insert_with(|| {
+    pub fn get_default_zone(&mut self) -> MutPtr<malloc_zone_t> {
+        if self.default_zone.get().is_none() {
+            let zone_size = guest_size_of::<malloc_zone_t>();
+            let chunk = self
+                .vm_allocator
+                .allocate(None, zone_size)
+                .expect("Failed to allocate default zone");
+            let zone = Ptr::from_bits(chunk.base);
+            self.write(zone, malloc_zone_t::new());
+            self.default_zone.set(zone).unwrap();
+
             let Some(heap) = self.vm_allocator.allocate(None, Self::HEAP_SIZE) else {
-                panic!("Failed to allocate heap space");
+                panic!("Failed to allocate space for heap");
             };
-            allocator::HeapAllocator::new(heap.base, heap.size.get())
+            let allocator = allocator::HeapAllocator::new(heap.base, heap.size.get());
+            assert!(self.heap_allocators.insert(zone, allocator).is_none());
+        }
+
+        *self.default_zone.get().unwrap()
+    }
+
+    /// Get the allocator for the corresponding memory zone
+    fn get_allocator(&mut self, zone: MutPtr<malloc_zone_t>) -> &mut allocator::HeapAllocator {
+        self.heap_allocators.get_mut(&zone).unwrap_or_else(|| {
+            panic!(
+                "Attempted to allocate in zone {:?} which does not exist",
+                zone
+            )
         })
     }
 
@@ -530,16 +556,22 @@ impl Mem {
 
     /// Allocate `size` bytes.
     pub fn alloc(&mut self, size: GuestUSize) -> MutVoidPtr {
+        let zone = self.get_default_zone();
+        self.zone_alloc(zone, size)
+    }
+
+    /// Allocate `size` bytes in `zone`
+    pub fn zone_alloc(&mut self, zone: MutPtr<malloc_zone_t>, size: GuestUSize) -> MutVoidPtr {
         let ptr = if size > Self::MAX_HEAP_ALLOCATION_SIZE {
             let ptr = self.alloc_paged(size);
 
-            self.heap_allocator()
+            self.get_allocator(zone)
                 .add_external_allocation(Chunk::new(ptr.to_bits(), size));
 
             ptr
         } else {
             let address = self
-                .heap_allocator()
+                .get_allocator(zone)
                 .alloc(size)
                 .or_else(|| {
                     log!("Failed to allocate, attempting to grow heap");
@@ -547,8 +579,8 @@ impl Mem {
                         .vm_allocator
                         .allocate(None, Self::HEAP_SIZE)
                         .expect("Failed to allocate memory for heap.");
-                    self.heap_allocator().grow(new_chunk);
-                    self.heap_allocator().alloc(size)
+                    self.get_allocator(zone).grow(new_chunk);
+                    self.get_allocator(zone).alloc(size)
                 })
                 .expect("Could not find large enough chunk to allocate {size:#x} bytes");
             Ptr::from_bits(address)
@@ -587,28 +619,64 @@ impl Mem {
     }
 
     pub fn malloc_size(&mut self, ptr: ConstVoidPtr) -> GuestUSize {
-        self.heap_allocator().find_allocated_size(ptr.to_bits())
+        let zone = self.get_default_zone();
+        self.zone_malloc_size(zone, ptr)
+    }
+
+    pub fn zone_malloc_size(
+        &mut self,
+        zone: MutPtr<malloc_zone_t>,
+        ptr: ConstVoidPtr,
+    ) -> GuestUSize {
+        self.get_allocator(zone).find_allocated_size(ptr.to_bits())
     }
 
     pub fn realloc(&mut self, old_ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
+        let zone = self.get_default_zone();
+        self.zone_realloc(zone, old_ptr, size)
+    }
+
+    pub fn zone_realloc(
+        &mut self,
+        zone: MutPtr<malloc_zone_t>,
+        old_ptr: MutVoidPtr,
+        size: GuestUSize,
+    ) -> MutVoidPtr {
         if old_ptr.is_null() {
             return self.alloc(size);
         }
         // TODO: for a moment we always assume that we do not have enough size
         //       to realloc inplace
-        let old_size = self.heap_allocator().find_allocated_size(old_ptr.to_bits());
+        let old_size = self
+            .get_allocator(zone)
+            .find_allocated_size(old_ptr.to_bits());
         if old_size >= size {
             return old_ptr;
         }
-        let new_ptr = self.alloc(size);
+        let new_ptr = self.zone_alloc(zone, size);
         self.memmove(new_ptr, old_ptr.cast_const(), old_size);
-        self.free(old_ptr);
+        self.zone_free(zone, old_ptr);
         new_ptr
     }
 
     /// Free an allocation made with one of the `alloc` methods on this type.
     pub fn free(&mut self, ptr: MutVoidPtr) {
-        let size = self.heap_allocator().free(ptr.to_bits());
+        let zone = self.get_default_zone();
+        self.zone_free(zone, ptr);
+    }
+
+    /// Free an allocation made with one of the `alloc` methods in a zone
+    pub fn zone_free(&mut self, zone: MutPtr<malloc_zone_t>, ptr: MutVoidPtr) {
+        let size = self
+            .heap_allocators
+            .get_mut(&zone)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Attempted to allocate in zone {:?} which does not exist",
+                    zone
+                )
+            })
+            .free(ptr.to_bits());
 
         if size > Self::MAX_HEAP_ALLOCATION_SIZE {
             self.vm_allocator.deallocate(ptr.to_bits(), size);
