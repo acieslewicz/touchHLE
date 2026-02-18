@@ -67,7 +67,12 @@ fn malloc_create_zone(
     env.mem.create_zone(start_size)
 }
 
+fn malloc_destroy_zone(env: &mut Environment, zone: MutPtr<malloc_zone_t>) {
+    env.mem.destroy_zone(zone);
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(malloc_default_zone()),
     export_c_func!(malloc_create_zone(_, _)),
+    export_c_func!(malloc_destroy_zone(_)),
 ];

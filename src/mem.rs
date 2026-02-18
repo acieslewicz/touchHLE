@@ -370,6 +370,22 @@ impl Mem {
         zone
     }
 
+    pub fn destroy_zone(&mut self, zone: MutPtr<malloc_zone_t>) {
+        assert_ne!(
+            zone,
+            *self.default_zone.get().unwrap(),
+            "Attempted to delete default zone"
+        );
+
+        if let Some(allocator) = self.heap_allocators.remove(&zone) {
+            for chunk in allocator.owned_chunks() {
+                self.vm_allocator.deallocate(chunk.base, chunk.size.get());
+            }
+        }
+
+        self.free(zone.cast());
+    }
+
     /// Get the allocator for the corresponding memory zone
     fn get_allocator(&mut self, zone: MutPtr<malloc_zone_t>) -> &mut allocator::HeapAllocator {
         self.heap_allocators.get_mut(&zone).unwrap_or_else(|| {
